@@ -1,0 +1,220 @@
+---
+title: "Check Teams"
+author: "Nurun Naher"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is a rmd script to check how many members are there in each team. I want to know how many teams has 2 members or 3 members.
+Then will process the fnirs data for teams with 3 members
+
+```{r is_valid}
+# Load necessary library
+library(dplyr)
+library(tidyr)
+library(data.table)
+library(ggplot2)
+#setwd("~/Documents/Research/ExtendedCognition")
+setwd("~/Rcode/ExtendedCognition")
+# Read the CSV file
+data_validity <- read.csv("data/data_validity_all.csv")
+
+# Perform the query
+result <- data_validity %>%
+  filter(modality == "fnirs" & is_valid == 1) %>%
+  group_by(group_session) %>%
+  summarise(valid_stations = n())
+
+# Get the teams with 3 valid stations
+teams_with_3_members <- result %>%
+  filter(valid_stations == 3)
+
+# Count how many teams have 3 valid stations
+number_of_teams_with_3_members <- nrow(teams_with_3_members)
+
+# View the dataframe with group_session IDs
+print(teams_with_3_members)
+
+# Get the teams with 2 valid stations
+teams_with_2_members <- result %>%
+  filter(valid_stations == 2)
+
+# Count how many teams have 2 valid stations
+number_of_teams_with_2_members <- nrow(teams_with_2_members)
+
+# View the dataframe with group_session IDs
+print(teams_with_2_members)
+
+
+```
+```{r define align function}
+align_closest <- function(df_list) {
+  # Convert all timestamps to numeric for alignment
+  df_list <- lapply(df_list, function(df) {
+    df$timestamp_unix <- as.numeric(df$timestamp_unix)
+    return(df)
+  })
+  
+  # Rename columns according to the station name before aligning
+  df_list <- lapply(df_list, function(df) {
+    # Extract the station name
+    station_name <- unique(df$station)[1]
+    
+    # Rename the relevant columns
+    names(df) <- gsub("HbR_avg", paste0(station_name, "_HbRAvg"), names(df))
+    names(df) <- gsub("HbO_avg", paste0(station_name, "_HbOAvg"), names(df))
+    
+    return(df)
+  })
+  
+  # Merge data frames by finding the closest timestamps
+  aligned_data <- Reduce(function(x, y) {
+    # Perform a join with nearest matching timestamps
+    data.table::setDT(x)
+    data.table::setDT(y)
+    y <- y[x, on = .(timestamp_unix), roll = "nearest"]
+    return(y)
+  }, df_list)
+  
+  return(aligned_data)
+}
+
+
+```
+``` {r}
+# Define the path to the folder containing the CSV files
+data_folder <- "data/fnirs_export_clean/"
+
+# Initialize a list to store the resulting data frames for each team
+team_data_list <- list()
+
+# Loop through each group_session in teams_with_3_members
+for (i in seq_along(teams_with_3_members$group_session)) {
+  print(teams_with_3_members$group_session[i])
+  team_name <- paste0("team", i)
+  file_name <- paste0(data_folder, teams_with_3_members$group_session[i], "_avg_channels.csv")
+  group_session_data <- read.csv(file_name)
+  
+  # Split the data by station for the current team
+  split_data <- split(group_session_data, group_session_data$station)
+  
+  # Align data for the current team using the closest timestamps
+  aligned_team_data <- align_closest(split_data)
+  
+  # Dynamically create column names based on the team name
+  temp_team_df <- aligned_team_data %>%
+    select(
+      !!paste0(team_name, "_timestamp") := timestamp_unix,
+      !!paste0(team_name, "_lion_HbRAvg") := lion_HbRAvg,
+      !!paste0(team_name, "_tiger_HbRAvg") := tiger_HbRAvg,
+      !!paste0(team_name, "_leopard_HbRAvg") := leopard_HbRAvg
+    )
+  
+  # Store the resulting dataframe in the list with the team name as the key
+  team_data_list[[team_name]] <- temp_team_df
+  print(nrow(temp_team_df))
+}
+# Function to pad a data frame with NAs to match the maximum row count
+pad_data_frame <- function(df, max_rows) {
+  if (nrow(df) < max_rows) {
+    # Calculate the number of rows to add
+    rows_to_add <- max_rows - nrow(df)
+    # Create an empty data frame with NAs to add
+    empty_df <- as.data.frame(matrix(NA, nrow = rows_to_add, ncol = ncol(df)))
+    colnames(empty_df) <- colnames(df)
+    # Bind the original data frame with the empty one to match the row count
+    df <- rbind(df, empty_df)
+  }
+  return(df)
+}
+
+# Find the maximum number of rows among all team data frames
+max_rows <- max(sapply(team_data_list, nrow))
+
+# Pad all data frames to have the same number of rows
+padded_team_data_list <- lapply(team_data_list, pad_data_frame, max_rows = max_rows)
+
+# Combine all data frames in the list horizontally without matching columns
+combined_wide_format_data <- do.call(cbind, padded_team_data_list)
+head(combined_wide_format_data)
+
+
+# Optionally, save the combined wide format data to a CSV file
+#write.csv(combined_wide_format_data, "allTeams.csv", row.names = FALSE)
+
+```
+```{r}
+# Function to clean up column names by removing redundant prefixes
+clean_column_names <- function(col_names) {
+  sapply(col_names, function(name) {
+    # Remove redundant prefix like "team1." from "team1.team1_timestamp"
+    gsub("team[0-9]+\\.", "", name)
+  })
+}
+
+# Apply the function to clean the column names
+colnames(combined_wide_format_data) <- clean_column_names(colnames(combined_wide_format_data))
+
+# View the cleaned column names
+head(colnames(combined_wide_format_data))
+```
+
+
+
+
+
+
+``` {r}
+library(ggplot2)
+library(tidyr)
+# Get the total number of columns
+total_columns <- ncol(combined_wide_format_data)
+
+# Loop through the columns in groups of 4 to handle each team's data
+for (i in seq(1, total_columns, by = 4)) {
+  # Calculate the team number based on the column index
+  team_number <- (i - 1) / 4 + 1
+  team_name <- paste0("team", team_number)
+  
+  # Extract the relevant columns for the current team
+  team_data <- combined_wide_format_data %>%
+    select(
+      timestamp = colnames(combined_wide_format_data)[i],
+      lion_HbRAvg = colnames(combined_wide_format_data)[i + 1],
+      tiger_HbRAvg = colnames(combined_wide_format_data)[i + 2],
+      leopard_HbRAvg = colnames(combined_wide_format_data)[i + 3]
+    ) %>%
+    drop_na()  # Remove rows with any NA values
+  
+  # Convert the data to long format for easier plotting
+  team_data_long <- team_data %>%
+    pivot_longer(cols = -timestamp, names_to = "station", values_to = "HbRAvg")
+  
+  # Plot the data with facet_wrap to separate plots for each station
+  p <- ggplot(team_data_long, aes(x = timestamp, y = HbRAvg)) +
+    geom_line() +
+    facet_wrap(~station, scales = "free_y", ncol = 1) +  # Separate plots for each station
+    labs(title = paste("HbRAvg Values for", team_name),
+         x = "Timestamp", y = "HbRAvg") +
+    theme_minimal() +
+    theme(legend.position = "none")  # Remove legend since we have separate panels
+  
+  # Save the plot
+  ggsave(filename = paste0("plot/", team_name, "_HbRAvg_plot.png"), plot = p, width = 10, height = 12)
+  
+  # Alternatively, you can print the plot to display it in the console
+  print(p)
+  
+  # Count the total number of NA values in the combined_data
+  total_na <- sum(is.na(team_data))
+  print(total_na)  # Prints the total count of NA values
+
+}
+
+```
